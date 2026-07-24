@@ -1,0 +1,28 @@
+Candidate_ID,Name,Department,Role,Years_Experience,Expected_Salary,Interview_Score,Application_Date,Status
+C001,Aarav Sharma,Engineering,React Developer,3,65000,85,2026-05-12,Offered
+C002,Aditi Patel,Engineering,Node.js Developer,5,85000,90,2026-05-14,Hired
+C003,Rahul Verma,Sales,Account Executive,2,45000,75,2026-05-15,Interviewing
+C004,Pooja Singh,HR,Talent Acquisition,4,55000,80,2026-05-18,Hired
+C005,Amit Kumar,Engineering,DevOps Engineer,6,95000,88,2026-05-20,Applied
+C006,Neha Gupta,Marketing,SEO Analyst,1,38000,70,2026-05-22,Rejected
+C007,Vikram Malhotra,Sales,Sales Manager,8,90000,92,2026-05-23,Hired
+C008,Sneha Reddy,Engineering,QA Engineer,3,58000,82,2026-05-25,Interviewing
+C009,Rohan Das,Engineering,Python Developer,4,72000,87,2026-05-26,Offered
+C010,Kriti Joshi,HR,HR Operations,2,40000,78,2026-05-28,Applied
+C011,Siddharth Nair,Marketing,Content Strategist,3,48000,81,2026-05-29,Interviewing
+C012,Ananya Rao,Engineering,React Developer,2,55000,79,2026-06-01,Applied
+C013,Varun Mehta,Sales,Business Development,1,35000,65,2026-06-02,Rejected
+C014,Divya Kapoor,Engineering,Data Scientist,5,92000,94,2026-06-04,Hired
+C015,Karan Johar,Marketing,Brand Manager,7,82000,86,2026-06-05,Offered
+C016,Meera Nair,HR,Recruiter,3,50000,83,2026-06-08,Hired
+C017,Abhishek Roy,Engineering,Node.js Developer,4,75000,84,2026-06-10,Interviewing
+C018,Ritu Sen,Sales,Account Executive,3,48000,76,2026-06-12,Applied
+C019,Vijay Khanna,Engineering,Python Developer,7,105000,91,2026-06-14,Hired
+C020,Shreya Ghoshal,Marketing,Social Media Manager,2,42000,80,2026-06-15,Applied
+C021,Rajesh Koothrapali,Engineering,Data Analyst,3,60000,85,2026-06-18,Interviewing
+C022,Penny Hofstadter,Sales,Sales Rep,4,50000,77,2026-06-20,Applied
+C023,Leonard Hofstadter,Engineering,Research Scientist,6,11000,95,2026-06-21,Hired
+C024,Sheldon Cooper,Engineering,Theoretical Physicist,10,180000,100,2026-06-22,Hired
+C025,Howard Wolowitz,Engineering,Aerospace Engineer,8,95000,89,2026-06-23,Offered
+C026,Bernadette Rostenkowski,HR,HR Manager,5,85000,93,2026-06-24,Hired
+C027,Amy Farrah Fowler,Engineering,Neurobiologist,6,105000,94,2026-06-25,Interviewing
