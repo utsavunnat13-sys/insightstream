@@ -303,20 +303,10 @@ if not os.path.exists(FRONTEND_DIST):
 if not os.path.exists(FRONTEND_DIST) or not os.path.exists(os.path.join(FRONTEND_DIST, "index.html")):
     FRONTEND_DIST = base_dir
 
-@app.get("/", response_class=HTMLResponse)
-async def serve_root():
-    index_path = os.path.join(FRONTEND_DIST, "index.html")
-    if os.path.exists(index_path):
-        with open(index_path, "r", encoding="utf-8") as f:
-            return f.read()
-    return "<h1>InsightStream API is Active</h1>"
-
-if os.path.exists(FRONTEND_DIST):
+if os.path.exists(os.path.join(FRONTEND_DIST, "index.html")):
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
-
-
