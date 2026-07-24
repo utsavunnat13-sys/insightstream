@@ -256,10 +256,16 @@ async def serve_root():
 async def serve_static_or_spa(file_path: str):
     if file_path.startswith("api"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
+        
+    base_name = os.path.basename(file_path)
+    
+    # Check exact relative path or filename basename across all possible folders
     for folder in [os.path.join(base_dir, "dist"), os.path.join(base_dir, "frontend", "dist"), base_dir]:
-        target = os.path.join(folder, file_path)
-        if os.path.isfile(target):
-            return FileResponse(target)
+        for candidate in [os.path.join(folder, file_path), os.path.join(folder, base_name)]:
+            if os.path.isfile(candidate):
+                return FileResponse(candidate)
+                
+    # SPA fallback for page navigation
     for index_path in [
         os.path.join(base_dir, "dist", "index.html"),
         os.path.join(base_dir, "frontend", "dist", "index.html"),
@@ -267,6 +273,7 @@ async def serve_static_or_spa(file_path: str):
     ]:
         if os.path.exists(index_path):
             return FileResponse(index_path)
+            
     raise HTTPException(status_code=404, detail="Not Found")
 
 if __name__ == "__main__":
