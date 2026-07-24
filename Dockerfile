@@ -3,7 +3,7 @@ FROM node:20-slim AS frontend-builder
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN rm -f package-lock.json && npm install
 
 COPY . ./
 RUN npm run build
@@ -27,4 +27,5 @@ EXPOSE 8000
 ENV PORT=8000
 
 CMD ["python", "main.py"]
+
 
