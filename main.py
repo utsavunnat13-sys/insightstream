@@ -1,6 +1,7 @@
 import os
 import sys
 import shutil
+import json
 
 # Ensure current directory and backend directory are in sys.path
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -94,14 +95,15 @@ class QueryRequest(BaseModel):
     mode: Optional[str] = "structured"
 
 def get_df(filename: str) -> pd.DataFrame:
-    if filename in DATASETS_CACHE:
-        return DATASETS_CACHE[filename]
-    filepath = os.path.join(UPLOAD_DIR, filename)
+    filename_clean = os.path.basename(filename)
+    if filename_clean in DATASETS_CACHE:
+        return DATASETS_CACHE[filename_clean]
+    filepath = os.path.join(UPLOAD_DIR, filename_clean)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="File not found")
     try:
         df = pd.read_csv(filepath)
-        DATASETS_CACHE[filename] = df
+        DATASETS_CACHE[filename_clean] = df
         return df
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read CSV: {e}")
@@ -110,7 +112,8 @@ def get_df(filename: str) -> pd.DataFrame:
 async def upload_file(file: UploadFile = File(...)):
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
-    filepath = os.path.join(UPLOAD_DIR, file.filename)
+    filename = os.path.basename(file.filename)
+    filepath = os.path.join(UPLOAD_DIR, filename)
     try:
         with open(filepath, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
@@ -118,7 +121,7 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
     try:
         df = pd.read_csv(filepath)
-        DATASETS_CACHE[file.filename] = df
+        DATASETS_CACHE[filename] = df
     except Exception as e:
         if os.path.exists(filepath):
             os.remove(filepath)
@@ -131,19 +134,23 @@ async def upload_file(file: UploadFile = File(...)):
         unique_count = int(series.nunique())
         dtype = str(series.dtype)
         col_info = {
-            "name": col,
+            "name": str(col),
             "type": dtype,
             "null_count": null_count,
             "null_percentage": round((null_count / num_rows) * 100, 2) if num_rows > 0 else 0,
             "unique_count": unique_count,
-            "sample_values": series.dropna().head(5).tolist()
+            "sample_values": [str(v) for v in series.dropna().head(5).tolist()]
         }
         if np.issubdtype(series.dtype, np.number):
+            mean_val = float(series.mean()) if not pd.isnull(series.mean()) else None
+            min_val = float(series.min()) if not pd.isnull(series.min()) else None
+            max_val = float(series.max()) if not pd.isnull(series.max()) else None
+            std_val = float(series.std()) if not pd.isnull(series.std()) else None
             col_info.update({
-                "mean": round(float(series.mean()), 2) if not pd.isnull(series.mean()) else None,
-                "min": float(series.min()) if not pd.isnull(series.min()) else None,
-                "max": float(series.max()) if not pd.isnull(series.max()) else None,
-                "std": round(float(series.std()), 2) if not pd.isnull(series.std()) else None,
+                "mean": round(mean_val, 2) if mean_val is not None else None,
+                "min": round(min_val, 2) if min_val is not None else None,
+                "max": round(max_val, 2) if max_val is not None else None,
+                "std": round(std_val, 2) if std_val is not None else None,
                 "is_numeric": True
             })
         else:
@@ -153,9 +160,9 @@ async def upload_file(file: UploadFile = File(...)):
                 "is_numeric": False
             })
         columns_profile.append(col_info)
-    sample_rows = df.head(10).replace([np.inf, -np.inf], np.nan).where(pd.notnull(df), None).to_dict(orient="records")
+    sample_rows = json.loads(df.head(10).to_json(orient="records"))
     return {
-        "filename": file.filename,
+        "filename": filename,
         "rows": num_rows,
         "columns_count": num_cols,
         "columns": columns_profile,
@@ -174,19 +181,23 @@ async def get_file_profile(filename: str):
         unique_count = int(series.nunique())
         dtype = str(series.dtype)
         col_info = {
-            "name": col,
+            "name": str(col),
             "type": dtype,
             "null_count": null_count,
             "null_percentage": round((null_count / num_rows) * 100, 2) if num_rows > 0 else 0,
             "unique_count": unique_count,
-            "sample_values": series.dropna().head(5).tolist()
+            "sample_values": [str(v) for v in series.dropna().head(5).tolist()]
         }
         if np.issubdtype(series.dtype, np.number):
+            mean_val = float(series.mean()) if not pd.isnull(series.mean()) else None
+            min_val = float(series.min()) if not pd.isnull(series.min()) else None
+            max_val = float(series.max()) if not pd.isnull(series.max()) else None
+            std_val = float(series.std()) if not pd.isnull(series.std()) else None
             col_info.update({
-                "mean": round(float(series.mean()), 2) if not pd.isnull(series.mean()) else None,
-                "min": float(series.min()) if not pd.isnull(series.min()) else None,
-                "max": float(series.max()) if not pd.isnull(series.max()) else None,
-                "std": round(float(series.std()), 2) if not pd.isnull(series.std()) else None,
+                "mean": round(mean_val, 2) if mean_val is not None else None,
+                "min": round(min_val, 2) if min_val is not None else None,
+                "max": round(max_val, 2) if max_val is not None else None,
+                "std": round(std_val, 2) if std_val is not None else None,
                 "is_numeric": True
             })
         else:
@@ -196,7 +207,7 @@ async def get_file_profile(filename: str):
                 "is_numeric": False
             })
         columns_profile.append(col_info)
-    sample_rows = df.head(10).replace([np.inf, -np.inf], np.nan).where(pd.notnull(df), None).to_dict(orient="records")
+    sample_rows = json.loads(df.head(10).to_json(orient="records"))
     return {
         "filename": filename,
         "rows": num_rows,
@@ -220,25 +231,27 @@ async def query_dataset(request: QueryRequest):
 @app.get("/api/files")
 async def list_files():
     files = []
-    for f in os.listdir(UPLOAD_DIR):
-        if f.endswith(".csv"):
-            filepath = os.path.join(UPLOAD_DIR, f)
-            size = os.path.getsize(filepath)
-            files.append({
-                "filename": f,
-                "size_bytes": size,
-                "cached": f in DATASETS_CACHE
-            })
+    if os.path.exists(UPLOAD_DIR):
+        for f in os.listdir(UPLOAD_DIR):
+            if f.endswith(".csv"):
+                filepath = os.path.join(UPLOAD_DIR, f)
+                size = os.path.getsize(filepath)
+                files.append({
+                    "filename": f,
+                    "size_bytes": size,
+                    "cached": f in DATASETS_CACHE
+                })
     return files
 
 @app.delete("/api/files/{filename}")
 async def delete_file(filename: str):
-    filepath = os.path.join(UPLOAD_DIR, filename)
+    filename_clean = os.path.basename(filename)
+    filepath = os.path.join(UPLOAD_DIR, filename_clean)
     if os.path.exists(filepath):
         os.remove(filepath)
-    if filename in DATASETS_CACHE:
-        del DATASETS_CACHE[filename]
-    return {"message": f"File '{filename}' deleted successfully."}
+    if filename_clean in DATASETS_CACHE:
+        del DATASETS_CACHE[filename_clean]
+    return {"message": f"File '{filename_clean}' deleted successfully."}
 
 # Static assets and SPA HTML fallback
 @app.get("/")
