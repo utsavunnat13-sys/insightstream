@@ -292,5 +292,18 @@ async def delete_file(filename: str):
     return {"message": f"File '{filename}' deleted successfully."}
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+   # Serve frontend built files
+base_dir = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIST = os.path.join(base_dir, "frontend", "dist")
+if not os.path.exists(FRONTEND_DIST):
+    FRONTEND_DIST = os.path.join(os.path.dirname(base_dir), "frontend", "dist")
+if not os.path.exists(FRONTEND_DIST):
+    FRONTEND_DIST = os.path.join(base_dir, "dist")
+if not os.path.exists(FRONTEND_DIST) or not os.path.exists(os.path.join(FRONTEND_DIST, "index.html")):
+    FRONTEND_DIST = base_dir
+
+if os.path.exists(os.path.join(FRONTEND_DIST, "index.html")):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+else:
+    print(f"Warning: index.html not found. Frontend will not be served.")
+
