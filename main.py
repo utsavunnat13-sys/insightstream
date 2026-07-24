@@ -151,7 +151,13 @@ async def upload_file(file: UploadFile = File(...)):
                 "sample_values": [str(v) for v in series.dropna().head(5).tolist()]
             }
             
-            if np.issubdtype(series.dtype, np.number):
+            is_num = False
+            try:
+                is_num = pd.api.types.is_numeric_dtype(series.dtype)
+            except Exception:
+                is_num = False
+
+            if is_num:
                 try:
                     mean_val = float(series.mean()) if not pd.isnull(series.mean()) else None
                     min_val = float(series.min()) if not pd.isnull(series.min()) else None
@@ -215,7 +221,14 @@ async def get_file_profile(filename: str):
                 "unique_count": unique_count,
                 "sample_values": [str(v) for v in series.dropna().head(5).tolist()]
             }
-            if np.issubdtype(series.dtype, np.number):
+            
+            is_num = False
+            try:
+                is_num = pd.api.types.is_numeric_dtype(series.dtype)
+            except Exception:
+                is_num = False
+
+            if is_num:
                 try:
                     mean_val = float(series.mean()) if not pd.isnull(series.mean()) else None
                     min_val = float(series.min()) if not pd.isnull(series.min()) else None
