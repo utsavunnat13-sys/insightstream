@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import json
+import tempfile
 
 # Ensure current directory and backend directory are in sys.path
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,7 +16,7 @@ import pandas as pd
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import dotenv
@@ -40,7 +41,8 @@ app.add_middleware(
 # In-memory storage for active datasets
 DATASETS_CACHE: Dict[str, pd.DataFrame] = {}
 
-UPLOAD_DIR = os.path.join(base_dir, "uploads")
+# Use temporary directory guaranteed to be writable on cloud platforms (Render/Linux)
+UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "insightstream_uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class SettingsUpdatePayload(BaseModel):
@@ -87,7 +89,7 @@ async def update_app_settings(payload: SettingsUpdatePayload):
         save_settings(new_settings)
         return {"success": True, "message": "Settings updated successfully."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save settings: {e}")
+        return JSONResponse(status_code=500, content={"detail": f"Failed to save settings: {e}"})
 
 class QueryRequest(BaseModel):
     query: str
@@ -110,123 +112,159 @@ def get_df(filename: str) -> pd.DataFrame:
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
-    filename = os.path.basename(file.filename)
-    filepath = os.path.join(UPLOAD_DIR, filename)
     try:
-        with open(filepath, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
-    try:
-        df = pd.read_csv(filepath)
-        DATASETS_CACHE[filename] = df
-    except Exception as e:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        raise HTTPException(status_code=400, detail=f"Invalid CSV structure: {e}")
-    num_rows, num_cols = df.shape
-    columns_profile = []
-    for col in df.columns:
-        series = df[col]
-        null_count = int(series.isnull().sum())
-        unique_count = int(series.nunique())
-        dtype = str(series.dtype)
-        col_info = {
-            "name": str(col),
-            "type": dtype,
-            "null_count": null_count,
-            "null_percentage": round((null_count / num_rows) * 100, 2) if num_rows > 0 else 0,
-            "unique_count": unique_count,
-            "sample_values": [str(v) for v in series.dropna().head(5).tolist()]
-        }
-        if np.issubdtype(series.dtype, np.number):
-            mean_val = float(series.mean()) if not pd.isnull(series.mean()) else None
-            min_val = float(series.min()) if not pd.isnull(series.min()) else None
-            max_val = float(series.max()) if not pd.isnull(series.max()) else None
-            std_val = float(series.std()) if not pd.isnull(series.std()) else None
-            col_info.update({
-                "mean": round(mean_val, 2) if mean_val is not None else None,
-                "min": round(min_val, 2) if min_val is not None else None,
-                "max": round(max_val, 2) if max_val is not None else None,
-                "std": round(std_val, 2) if std_val is not None else None,
-                "is_numeric": True
-            })
-        else:
-            top_counts = series.value_counts().head(5)
-            col_info.update({
-                "top_values": [{"val": str(k), "count": int(v)} for k, v in top_counts.items()],
-                "is_numeric": False
-            })
-        columns_profile.append(col_info)
-    sample_rows = json.loads(df.head(10).to_json(orient="records"))
-    return {
-        "filename": filename,
-        "rows": num_rows,
-        "columns_count": num_cols,
-        "columns": columns_profile,
-        "preview": sample_rows,
-        "message": "File uploaded and profiled successfully."
-    }
+        if not file.filename.endswith(".csv"):
+            return JSONResponse(status_code=400, content={"detail": "Only CSV files are supported."})
+        
+        filename = os.path.basename(file.filename)
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        
+        try:
+            with open(filepath, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+        except Exception as save_err:
+            return JSONResponse(status_code=500, content={"detail": f"Failed to save file: {save_err}"})
+            
+        try:
+            df = pd.read_csv(filepath)
+            DATASETS_CACHE[filename] = df
+        except Exception as csv_err:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            return JSONResponse(status_code=400, content={"detail": f"Invalid CSV structure: {csv_err}"})
+            
+        num_rows, num_cols = df.shape
+        columns_profile = []
+        
+        for col in df.columns:
+            series = df[col]
+            null_count = int(series.isnull().sum())
+            unique_count = int(series.nunique())
+            dtype = str(series.dtype)
+            
+            col_info = {
+                "name": str(col),
+                "type": dtype,
+                "null_count": null_count,
+                "null_percentage": round((null_count / num_rows) * 100, 2) if num_rows > 0 else 0,
+                "unique_count": unique_count,
+                "sample_values": [str(v) for v in series.dropna().head(5).tolist()]
+            }
+            
+            if np.issubdtype(series.dtype, np.number):
+                try:
+                    mean_val = float(series.mean()) if not pd.isnull(series.mean()) else None
+                    min_val = float(series.min()) if not pd.isnull(series.min()) else None
+                    max_val = float(series.max()) if not pd.isnull(series.max()) else None
+                    std_val = float(series.std()) if not pd.isnull(series.std()) else None
+                    
+                    col_info.update({
+                        "mean": round(mean_val, 2) if mean_val is not None else None,
+                        "min": round(min_val, 2) if min_val is not None else None,
+                        "max": round(max_val, 2) if max_val is not None else None,
+                        "std": round(std_val, 2) if std_val is not None else None,
+                        "is_numeric": True
+                    })
+                except Exception:
+                    col_info.update({"is_numeric": False})
+            else:
+                try:
+                    top_counts = series.value_counts().head(5)
+                    col_info.update({
+                        "top_values": [{"val": str(k), "count": int(v)} for k, v in top_counts.items()],
+                        "is_numeric": False
+                    })
+                except Exception:
+                    col_info.update({"top_values": [], "is_numeric": False})
+                
+            columns_profile.append(col_info)
+            
+        try:
+            sample_rows = json.loads(df.head(10).to_json(orient="records"))
+        except Exception:
+            sample_rows = []
+            
+        return JSONResponse(status_code=200, content={
+            "filename": filename,
+            "rows": num_rows,
+            "columns_count": num_cols,
+            "columns": columns_profile,
+            "preview": sample_rows,
+            "message": "File uploaded and profiled successfully."
+        })
+        
+    except Exception as general_err:
+        return JSONResponse(status_code=500, content={"detail": f"Upload process failed: {str(general_err)}"})
 
 @app.get("/api/files/{filename}")
 async def get_file_profile(filename: str):
-    df = get_df(filename)
-    num_rows, num_cols = df.shape
-    columns_profile = []
-    for col in df.columns:
-        series = df[col]
-        null_count = int(series.isnull().sum())
-        unique_count = int(series.nunique())
-        dtype = str(series.dtype)
-        col_info = {
-            "name": str(col),
-            "type": dtype,
-            "null_count": null_count,
-            "null_percentage": round((null_count / num_rows) * 100, 2) if num_rows > 0 else 0,
-            "unique_count": unique_count,
-            "sample_values": [str(v) for v in series.dropna().head(5).tolist()]
-        }
-        if np.issubdtype(series.dtype, np.number):
-            mean_val = float(series.mean()) if not pd.isnull(series.mean()) else None
-            min_val = float(series.min()) if not pd.isnull(series.min()) else None
-            max_val = float(series.max()) if not pd.isnull(series.max()) else None
-            std_val = float(series.std()) if not pd.isnull(series.std()) else None
-            col_info.update({
-                "mean": round(mean_val, 2) if mean_val is not None else None,
-                "min": round(min_val, 2) if min_val is not None else None,
-                "max": round(max_val, 2) if max_val is not None else None,
-                "std": round(std_val, 2) if std_val is not None else None,
-                "is_numeric": True
-            })
-        else:
-            top_counts = series.value_counts().head(5)
-            col_info.update({
-                "top_values": [{"val": str(k), "count": int(v)} for k, v in top_counts.items()],
-                "is_numeric": False
-            })
-        columns_profile.append(col_info)
-    sample_rows = json.loads(df.head(10).to_json(orient="records"))
-    return {
-        "filename": filename,
-        "rows": num_rows,
-        "columns_count": num_cols,
-        "columns": columns_profile,
-        "preview": sample_rows,
-        "message": "File profiled successfully."
-    }
+    try:
+        df = get_df(filename)
+        num_rows, num_cols = df.shape
+        columns_profile = []
+        for col in df.columns:
+            series = df[col]
+            null_count = int(series.isnull().sum())
+            unique_count = int(series.nunique())
+            dtype = str(series.dtype)
+            col_info = {
+                "name": str(col),
+                "type": dtype,
+                "null_count": null_count,
+                "null_percentage": round((null_count / num_rows) * 100, 2) if num_rows > 0 else 0,
+                "unique_count": unique_count,
+                "sample_values": [str(v) for v in series.dropna().head(5).tolist()]
+            }
+            if np.issubdtype(series.dtype, np.number):
+                try:
+                    mean_val = float(series.mean()) if not pd.isnull(series.mean()) else None
+                    min_val = float(series.min()) if not pd.isnull(series.min()) else None
+                    max_val = float(series.max()) if not pd.isnull(series.max()) else None
+                    std_val = float(series.std()) if not pd.isnull(series.std()) else None
+                    col_info.update({
+                        "mean": round(mean_val, 2) if mean_val is not None else None,
+                        "min": round(min_val, 2) if min_val is not None else None,
+                        "max": round(max_val, 2) if max_val is not None else None,
+                        "std": round(std_val, 2) if std_val is not None else None,
+                        "is_numeric": True
+                    })
+                except Exception:
+                    col_info.update({"is_numeric": False})
+            else:
+                try:
+                    top_counts = series.value_counts().head(5)
+                    col_info.update({
+                        "top_values": [{"val": str(k), "count": int(v)} for k, v in top_counts.items()],
+                        "is_numeric": False
+                    })
+                except Exception:
+                    col_info.update({"top_values": [], "is_numeric": False})
+            columns_profile.append(col_info)
+        sample_rows = json.loads(df.head(10).to_json(orient="records"))
+        return JSONResponse(status_code=200, content={
+            "filename": filename,
+            "rows": num_rows,
+            "columns_count": num_cols,
+            "columns": columns_profile,
+            "preview": sample_rows,
+            "message": "File profiled successfully."
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"detail": f"Profiling failed: {str(e)}"})
 
 @app.post("/api/query")
 async def query_dataset(request: QueryRequest):
-    df = get_df(request.filename)
-    result = run_insight_query(
-        request.query, 
-        df, 
-        mode=request.mode or "structured", 
-        filename=request.filename
-    )
-    return result
+    try:
+        df = get_df(request.filename)
+        result = run_insight_query(
+            request.query, 
+            df, 
+            mode=request.mode or "structured", 
+            filename=request.filename
+        )
+        return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"detail": f"Query execution failed: {str(e)}"})
 
 @app.get("/api/files")
 async def list_files():
@@ -268,7 +306,7 @@ async def serve_root():
 @app.get("/{file_path:path}")
 async def serve_static_or_spa(file_path: str):
     if file_path.startswith("api"):
-        raise HTTPException(status_code=404, detail="API endpoint not found")
+        return JSONResponse(status_code=404, content={"detail": "API endpoint not found"})
         
     base_name = os.path.basename(file_path)
     
@@ -287,7 +325,7 @@ async def serve_static_or_spa(file_path: str):
         if os.path.exists(index_path):
             return FileResponse(index_path)
             
-    raise HTTPException(status_code=404, detail="Not Found")
+    return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 if __name__ == "__main__":
     import uvicorn
