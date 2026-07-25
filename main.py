@@ -41,8 +41,8 @@ app.add_middleware(
 # In-memory storage for active datasets
 DATASETS_CACHE: Dict[str, pd.DataFrame] = {}
 
-# Use temporary directory guaranteed to be writable on cloud platforms (Render/Linux)
-UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "insightstream_uploads")
+# Primary uploads directory inside application root
+UPLOAD_DIR = os.path.join(base_dir, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class SettingsUpdatePayload(BaseModel):
@@ -100,9 +100,24 @@ def get_df(filename: str) -> pd.DataFrame:
     filename_clean = os.path.basename(filename)
     if filename_clean in DATASETS_CACHE:
         return DATASETS_CACHE[filename_clean]
-    filepath = os.path.join(UPLOAD_DIR, filename_clean)
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="File not found")
+        
+    # Search all possible upload paths to guarantee data file access
+    possible_paths = [
+        os.path.join(UPLOAD_DIR, filename_clean),
+        os.path.join(base_dir, filename_clean),
+        os.path.join(tempfile.gettempdir(), "insightstream_uploads", filename_clean),
+        os.path.join(tempfile.gettempdir(), filename_clean)
+    ]
+    
+    filepath = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            filepath = p
+            break
+            
+    if not filepath:
+        raise HTTPException(status_code=404, detail=f"Dataset file '{filename_clean}' not found.")
+        
     try:
         df = pd.read_csv(filepath)
         DATASETS_CACHE[filename_clean] = df
@@ -119,11 +134,16 @@ async def upload_file(file: UploadFile = File(...)):
         filename = os.path.basename(file.filename)
         filepath = os.path.join(UPLOAD_DIR, filename)
         
+        # Write file with fallback to temp directory if needed
         try:
             with open(filepath, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
-        except Exception as save_err:
-            return JSONResponse(status_code=500, content={"detail": f"Failed to save file: {save_err}"})
+        except Exception:
+            alt_dir = os.path.join(tempfile.gettempdir(), "insightstream_uploads")
+            os.makedirs(alt_dir, exist_ok=True)
+            filepath = os.path.join(alt_dir, filename)
+            with open(filepath, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
             
         try:
             df = pd.read_csv(filepath)
@@ -282,24 +302,28 @@ async def query_dataset(request: QueryRequest):
 @app.get("/api/files")
 async def list_files():
     files = []
-    if os.path.exists(UPLOAD_DIR):
-        for f in os.listdir(UPLOAD_DIR):
-            if f.endswith(".csv"):
-                filepath = os.path.join(UPLOAD_DIR, f)
-                size = os.path.getsize(filepath)
-                files.append({
-                    "filename": f,
-                    "size_bytes": size,
-                    "cached": f in DATASETS_CACHE
-                })
+    seen = set()
+    for search_dir in [UPLOAD_DIR, os.path.join(tempfile.gettempdir(), "insightstream_uploads")]:
+        if os.path.exists(search_dir):
+            for f in os.listdir(search_dir):
+                if f.endswith(".csv") and f not in seen:
+                    filepath = os.path.join(search_dir, f)
+                    size = os.path.getsize(filepath)
+                    files.append({
+                        "filename": f,
+                        "size_bytes": size,
+                        "cached": f in DATASETS_CACHE
+                    })
+                    seen.add(f)
     return files
 
 @app.delete("/api/files/{filename}")
 async def delete_file(filename: str):
     filename_clean = os.path.basename(filename)
-    filepath = os.path.join(UPLOAD_DIR, filename_clean)
-    if os.path.exists(filepath):
-        os.remove(filepath)
+    for search_dir in [UPLOAD_DIR, os.path.join(tempfile.gettempdir(), "insightstream_uploads")]:
+        filepath = os.path.join(search_dir, filename_clean)
+        if os.path.exists(filepath):
+            os.remove(filepath)
     if filename_clean in DATASETS_CACHE:
         del DATASETS_CACHE[filename_clean]
     return {"message": f"File '{filename_clean}' deleted successfully."}
