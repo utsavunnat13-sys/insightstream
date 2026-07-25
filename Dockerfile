@@ -10,6 +10,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . ./
 
+# Ensure uploads folder exists with full read/write permissions
+RUN mkdir -p /app/uploads && chmod 777 /app/uploads
+
 EXPOSE 8000
 ENV PORT=8000
 
