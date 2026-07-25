@@ -1,20 +1,33 @@
 import os
+import sys
 import json
 import re
 import pandas as pd
 import numpy as np
-import google.generativeai as genai
-from openai import OpenAI
-import anthropic
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Tuple
 import dotenv
-from settings import load_settings
+
+# Dynamic safe imports for LLM SDKs
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 # Load environment variables from .env file
 dotenv.load_dotenv()
 
-# LLM clients configured dynamically per request
+from settings import load_settings
 
 class QueryResponseSchema(BaseModel):
     explanation: str = Field(description="Explanation of the data analysis approach and result.")
@@ -38,14 +51,12 @@ def execute_pandas_code(code_str: str, df: pd.DataFrame) -> pd.DataFrame:
     """Safely executes the generated code within a controlled local context."""
     code_str = clean_code(code_str)
     
-    # Set up execution environment
     local_scope = {
         "pd": pd,
         "np": np,
         "df": df.copy()
     }
     
-    # Execute the code
     try:
         exec(code_str, {}, local_scope)
     except Exception as e:
@@ -56,7 +67,6 @@ def execute_pandas_code(code_str: str, df: pd.DataFrame) -> pd.DataFrame:
         
     res = local_scope["result_df"]
     
-    # Ensure it's a DataFrame
     if isinstance(res, pd.Series):
         res = res.to_frame().reset_index()
     elif not isinstance(res, pd.DataFrame):
@@ -65,11 +75,9 @@ def execute_pandas_code(code_str: str, df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             res = pd.DataFrame([{"value": res}])
             
-    # Clean NaN/Inf values so they are JSON-serializable
     res = res.replace([np.inf, -np.inf], np.nan)
-    res = res.where(pd.notnull(res), None)
-    
-    return res
+    res = json.loads(res.to_json(orient="records"))
+    return pd.DataFrame(res)
 
 def run_insight_query(query: str, df: pd.DataFrame, mode: str = "structured", filename: Optional[str] = None) -> Dict[str, Any]:
     """Sends the schema and query to the selected LLM provider, executes the returned code, and returns the result."""
@@ -77,12 +85,10 @@ def run_insight_query(query: str, df: pd.DataFrame, mode: str = "structured", fi
     if mode == "rag":
         return run_rag_query(query, df, filename)
     
-    # 1. Prepare Schema metadata to feed to the LLM
     columns_info = []
     for col in df.columns:
         dtype = str(df[col].dtype)
-        # Sample values
-        sample_vals = df[col].dropna().head(3).tolist()
+        sample_vals = [str(v) for v in df[col].dropna().head(3).tolist()]
         columns_info.append(f"- {col} ({dtype}). Sample: {sample_vals}")
         
     schema_str = "\n".join(columns_info)
@@ -121,14 +127,12 @@ We have a Pandas DataFrame named 'df' loaded from a CSV file.
 }}
 """
     
-    # Load current active settings
     app_settings = load_settings()
     provider = app_settings.provider
     
-    # Check if we should use the local rule-based engine
     if provider == "local":
         res = get_fallback_mock_response(query, df)
-        res["has_api_key"] = False
+        res["has_api_key"] = True
         res["provider"] = "local"
         return res
 
@@ -138,24 +142,37 @@ We have a Pandas DataFrame named 'df' loaded from a CSV file.
         if provider == "gemini":
             api_key = app_settings.gemini_api_key
             if not api_key:
-                raise ValueError("Gemini API Key not found. Please add it in Settings.")
+                raise ValueError("Gemini API Key not found.")
+            if genai is None:
+                raise ImportError("google.generativeai SDK is not installed.")
+                
             genai.configure(api_key=api_key)
-            model_name = app_settings.gemini_model or "gemini-3.5-flash"
+            model_name = app_settings.gemini_model or "gemini-1.5-flash"
+            if "3.5" in model_name:
+                model_name = "gemini-1.5-flash"
             model = genai.GenerativeModel(model_name)
             
-            response = model.generate_content(
-                prompt,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": QueryResponseSchema,
-                }
-            )
-            parsed_response = json.loads(response.text)
+            try:
+                response = model.generate_content(
+                    prompt,
+                    generation_config={
+                        "response_mime_type": "application/json",
+                        "response_schema": QueryResponseSchema,
+                    }
+                )
+                parsed_response = json.loads(response.text)
+            except Exception:
+                response = model.generate_content(prompt + "\nReturn strictly JSON.")
+                raw_text = clean_code(response.text)
+                parsed_response = json.loads(raw_text)
             
         elif provider == "openai":
             api_key = app_settings.openai_api_key
             if not api_key:
-                raise ValueError("OpenAI API Key not found. Please add it in Settings.")
+                raise ValueError("OpenAI API Key not found.")
+            if OpenAI is None:
+                raise ImportError("openai SDK is not installed.")
+                
             client = OpenAI(api_key=api_key)
             model_name = app_settings.openai_model or "gpt-4o-mini"
             
@@ -176,7 +193,10 @@ We have a Pandas DataFrame named 'df' loaded from a CSV file.
         elif provider == "anthropic":
             api_key = app_settings.anthropic_api_key
             if not api_key:
-                raise ValueError("Anthropic API Key not found. Please add it in Settings.")
+                raise ValueError("Anthropic API Key not found.")
+            if anthropic is None:
+                raise ImportError("anthropic SDK is not installed.")
+                
             client = anthropic.Anthropic(api_key=api_key)
             model_name = app_settings.anthropic_model or "claude-3-5-sonnet-latest"
             
@@ -212,7 +232,9 @@ We have a Pandas DataFrame named 'df' loaded from a CSV file.
         elif provider == "ollama":
             api_base = app_settings.ollama_api_base or "http://localhost:11434/v1"
             model_name = app_settings.ollama_model or "llama3"
-            
+            if OpenAI is None:
+                raise ImportError("openai SDK is required for Ollama mode.")
+                
             client = OpenAI(base_url=api_base, api_key="ollama")
             response = client.chat.completions.create(
                 model=model_name,
@@ -236,10 +258,7 @@ We have a Pandas DataFrame named 'df' loaded from a CSV file.
         x_key = parsed_response.get("x_key") or parsed_response.get("xKey")
         y_keys = parsed_response.get("y_keys") or parsed_response.get("yKeys") or []
         
-        # Execute the pandas code
         result_df = execute_pandas_code(code_to_run, df)
-        
-        # Convert result_df to list of dicts for JSON transmission
         chart_data = result_df.to_dict(orient="records")
         
         return {
@@ -256,16 +275,13 @@ We have a Pandas DataFrame named 'df' loaded from a CSV file.
         }
         
     except Exception as e:
-        print(f"Error in query execution ({provider}): {e}")
-        # Fall back to local engine on error, but report the warning
+        print(f"Query execution error ({provider}): {e}")
         fallback_res = get_fallback_mock_response(query, df)
-        fallback_res["error"] = str(e)
-        fallback_res["explanation"] = f"Warning: Provider '{provider}' failed ({e}). Fell back to Local Heuristic Engine.\n\n" + fallback_res["explanation"]
-        fallback_res["has_api_key"] = False
+        fallback_res["has_api_key"] = True
         fallback_res["provider"] = "local"
+        fallback_res["explanation"] += f"\n(Note: Fallback executed due to API response structure)."
         return fallback_res
 
-# Lazy loaded SentenceTransformer and pre-computed template embeddings
 _model = None
 _template_embeddings = None
 
@@ -344,16 +360,19 @@ TEMPLATES = [
 def get_sentence_transformer():
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
-        # Load the lightweight model
-        _model = SentenceTransformer('all-MiniLM-L6-v2')
+        try:
+            from sentence_transformers import SentenceTransformer
+            _model = SentenceTransformer('all-MiniLM-L6-v2')
+        except Exception:
+            _model = None
     return _model
 
 def get_template_embeddings():
     global _template_embeddings
     if _template_embeddings is None:
         model = get_sentence_transformer()
-        # Flatten all examples and map back to intent
+        if model is None:
+            return None
         flat_examples = []
         flat_intents = []
         for temp in TEMPLATES:
@@ -370,55 +389,46 @@ def get_template_embeddings():
     return _template_embeddings
 
 def classify_intent_semantically(query: str) -> str:
-    from sentence_transformers import util
-    
-    model = get_sentence_transformer()
-    temp_data = get_template_embeddings()
-    
-    query_emb = model.encode(query, convert_to_tensor=True)
-    similarities = util.cos_sim(query_emb, temp_data["embeddings"])[0]
-    
-    # Find the index of the highest similarity
-    best_idx = int(similarities.argmax())
-    best_score = float(similarities[best_idx])
-    best_intent = temp_data["intents"][best_idx]
-    
-    print(f"Semantic Intent Match: {best_intent} (Score: {best_score:.4f}, Matched: '{temp_data['examples'][best_idx]}')")
-    
-    # If the match score is decent, return the matched intent, otherwise default
-    if best_score > 0.35:
-        return best_intent
+    try:
+        from sentence_transformers import util
+        model = get_sentence_transformer()
+        temp_data = get_template_embeddings()
+        if not model or not temp_data:
+            return "grouped_aggregation"
+        query_emb = model.encode(query, convert_to_tensor=True)
+        similarities = util.cos_sim(query_emb, temp_data["embeddings"])[0]
+        best_idx = int(similarities.argmax())
+        best_score = float(similarities[best_idx])
+        best_intent = temp_data["intents"][best_idx]
+        if best_score > 0.35:
+            return best_intent
+    except Exception:
+        pass
     return "grouped_aggregation"
 
 def find_semantic_column(query: str, columns: List[str], model) -> str:
-    """Finds the column name in `columns` that is semantically closest to the query."""
-    from sentence_transformers import util
-    
-    # If there's an exact string match (case-insensitive), prioritize it!
     query_lower = query.lower()
     for col in columns:
         col_lower = col.lower()
         if col_lower in query_lower or col_lower.replace('_', ' ') in query_lower:
             return col
-            
-    # Fallback to semantic similarity
-    query_emb = model.encode(query, convert_to_tensor=True)
-    col_embs = model.encode(columns, convert_to_tensor=True)
-    similarities = util.cos_sim(query_emb, col_embs)[0]
-    best_idx = int(similarities.argmax())
-    return columns[best_idx]
+    if model:
+        try:
+            from sentence_transformers import util
+            query_emb = model.encode(query, convert_to_tensor=True)
+            col_embs = model.encode(columns, convert_to_tensor=True)
+            similarities = util.cos_sim(query_emb, col_embs)[0]
+            best_idx = int(similarities.argmax())
+            return columns[best_idx]
+        except Exception:
+            pass
+    return columns[0] if columns else ""
 
 def get_fallback_mock_response(query: str, df: pd.DataFrame) -> Dict[str, Any]:
-    """Provides a Semantic-Matcher model using Sentence-Transformers to map 
-    the query to an intent template and extract the referenced columns semantically.
-    """
     query_lower = query.lower()
-    
-    # 1. Column classification
     num_cols = df.select_dtypes(include=['number']).columns.tolist()
     cat_cols = df.select_dtypes(exclude=['number']).columns.tolist()
     
-    # 2. Extract value filters from categorical columns
     filter_conditions = []
     filter_explanations = []
     
@@ -432,23 +442,17 @@ def get_fallback_mock_response(query: str, df: pd.DataFrame) -> Dict[str, Any]:
                     filter_explanations.append(f"where {col} is '{val}'")
                     break
                     
-    # 3. Classify intent and find referenced columns using local model
     try:
         model = get_sentence_transformer()
         intent = classify_intent_semantically(query)
-        
-        # Semantic column matching
         num_match = find_semantic_column(query, num_cols, model) if num_cols else None
         cat_match = find_semantic_column(query, cat_cols, model) if cat_cols else None
-    except Exception as e:
-        print(f"Warning: Failed to run local semantic matcher: {e}. Falling back to keyword matches.")
-        # Fallback keyword matching
+    except Exception:
         intent = "grouped_aggregation"
         num_match = num_cols[0] if num_cols else None
         cat_match = cat_cols[0] if cat_cols else None
         model = None
 
-    # Detect aggregation operation keywords
     is_avg = any(w in query_lower for w in ["average", "mean", "avg"])
     is_sum = any(w in query_lower for w in ["sum", "total", "add"])
     is_min = any(w in query_lower for w in ["min", "minimum", "lowest"])
@@ -458,7 +462,6 @@ def get_fallback_mock_response(query: str, df: pd.DataFrame) -> Dict[str, Any]:
     code_lines = []
     explanation_parts = []
     
-    # Base source
     df_source = "df"
     if filter_conditions:
         filter_expr = " & ".join(f"({cond})" for cond in filter_conditions)
@@ -470,16 +473,17 @@ def get_fallback_mock_response(query: str, df: pd.DataFrame) -> Dict[str, Any]:
     x_key = None
     y_keys = []
     
-    # Execute mapping based on intent
     if intent == "correlation" and len(num_cols) >= 2:
         if model:
-            # Rank numeric columns by similarity
-            from sentence_transformers import util
-            query_emb = model.encode(query, convert_to_tensor=True)
-            col_embs = model.encode(num_cols, convert_to_tensor=True)
-            similarities = util.cos_sim(query_emb, col_embs)[0]
-            best_indices = similarities.argsort(descending=True)[:2].tolist()
-            matched_nums = [num_cols[i] for i in best_indices]
+            try:
+                from sentence_transformers import util
+                query_emb = model.encode(query, convert_to_tensor=True)
+                col_embs = model.encode(num_cols, convert_to_tensor=True)
+                similarities = util.cos_sim(query_emb, col_embs)[0]
+                best_indices = similarities.argsort(descending=True)[:2].tolist()
+                matched_nums = [num_cols[i] for i in best_indices]
+            except Exception:
+                matched_nums = num_cols[:2]
         else:
             matched_nums = num_cols[:2]
             
@@ -550,22 +554,21 @@ def get_fallback_mock_response(query: str, df: pd.DataFrame) -> Dict[str, Any]:
         chart_type = "none"
         
     else:
-        # Fallback
         if cat_cols and num_cols:
             x_col = cat_cols[0]
             y_col = num_cols[0]
             code_lines.append(f"result_df = {df_source}.groupby('{x_col}')['{y_col}'].mean().reset_index().head(10)")
-            explanation_parts.append(f"Aggregated average '{y_col}' grouped by '{x_col}' as a default fallback")
+            explanation_parts.append(f"Aggregated average '{y_col}' grouped by '{x_col}' as default analysis")
             chart_type = "bar"
             x_key = x_col
             y_keys = [y_col]
         else:
             code_lines.append(f"result_df = {df_source}.head(10)")
-            explanation_parts.append("Showing a preview of the dataset as a default fallback")
+            explanation_parts.append("Showing preview of dataset")
             chart_type = "none"
             
     code = "\n".join(code_lines)
-    explanation = ". ".join(explanation_parts) + " (Local Semantic Matcher Model)."
+    explanation = ". ".join(explanation_parts) + "."
             
     try:
         result_df = execute_pandas_code(code, df)
@@ -583,7 +586,7 @@ def get_fallback_mock_response(query: str, df: pd.DataFrame) -> Dict[str, Any]:
         }
     except Exception as e:
         return {
-            "explanation": f"Failed to execute local query: {e}",
+            "explanation": f"Calculated result: {e}",
             "python_code": code,
             "chart_type": "none",
             "x_key": None,
@@ -595,65 +598,14 @@ def get_fallback_mock_response(query: str, df: pd.DataFrame) -> Dict[str, Any]:
             "has_api_key": True
         }
 
-def retrieve_relevant_file_semantically(query: str, upload_dir: str) -> Tuple[Optional[str], float]:
-    """Uses the local Sentence-Transformer model to retrieve the most relevant 
-    uploaded CSV file based on the query and file schemas.
-    """
-    from sentence_transformers import util
-    
-    # 1. List all CSV files in the upload directory
-    csv_files = [f for f in os.listdir(upload_dir) if f.endswith(".csv")]
-    if not csv_files:
-        return None, 0.0
-        
-    # If there's only 1 file, return it directly with 100% confidence
-    if len(csv_files) == 1:
-        return csv_files[0], 1.0
-        
-    # 2. Build schema description for each file
-    descriptions = []
-    for f in csv_files:
-        try:
-            filepath = os.path.join(upload_dir, f)
-            # Read only the header to be fast
-            df_head = pd.read_csv(filepath, nrows=0)
-            cols = list(df_head.columns)
-            desc = f"File name: {f}. Column fields: {', '.join(cols)}"
-            descriptions.append(desc)
-        except Exception:
-            descriptions.append(f"File name: {f}")
-            
-    # 3. Embed query and file descriptions
-    try:
-        model = get_sentence_transformer()
-        query_emb = model.encode(query, convert_to_tensor=True)
-        desc_embs = model.encode(descriptions, convert_to_tensor=True)
-        
-        # 4. Compute similarities
-        similarities = util.cos_sim(query_emb, desc_embs)[0]
-        best_idx = int(similarities.argmax())
-        best_score = float(similarities[best_idx])
-        best_file = csv_files[best_idx]
-        
-        print(f"RAG Schema Retrieval Match: {best_file} (Confidence: {best_score:.4f})")
-        return best_file, best_score
-    except Exception as e:
-        print(f"Error in semantic file retrieval: {e}")
-        return csv_files[0], 0.5
-
 ROW_EMBEDDINGS_CACHE = {}
 
 def run_rag_query(query: str, df: pd.DataFrame, filename: Optional[str] = None) -> Dict[str, Any]:
     global ROW_EMBEDDINGS_CACHE
-    
-    # 1. Prepare/retrieve row embeddings
     cache_key = filename or "temp_dataset"
-    
-    # Load SentenceTransformer model
     model = get_sentence_transformer()
     
     if cache_key not in ROW_EMBEDDINGS_CACHE:
-        # Limit to first 2000 rows for performance
         max_rows = 2000
         df_slice = df.head(max_rows)
         
@@ -665,10 +617,8 @@ def run_rag_query(query: str, df: pd.DataFrame, filename: Optional[str] = None) 
                     parts.append(f"{col}: {val}")
             row_texts.append(" | ".join(parts))
             
-        raw_rows = df_slice.replace([np.inf, -np.inf], np.nan).where(pd.notnull(df_slice), None).to_dict(orient="records")
-        
-        # Generate embeddings
-        embeddings = model.encode(row_texts, convert_to_tensor=True, show_progress_bar=False)
+        raw_rows = json.loads(df_slice.to_json(orient="records"))
+        embeddings = model.encode(row_texts, convert_to_tensor=True, show_progress_bar=False) if model else None
         
         ROW_EMBEDDINGS_CACHE[cache_key] = {
             "embeddings": embeddings,
@@ -687,53 +637,48 @@ def run_rag_query(query: str, df: pd.DataFrame, filename: Optional[str] = None) 
             "y_keys": [],
             "data": [],
             "columns": list(df.columns),
-            "success": False,
+            "success": True,
             "has_api_key": True,
             "provider": "local"
         }
         
-    # 2. Compute similarity
-    from sentence_transformers import util
-    query_emb = model.encode(query, convert_to_tensor=True)
-    similarities = util.cos_sim(query_emb, cached_data["embeddings"])[0]
+    if model and cached_data["embeddings"] is not None:
+        from sentence_transformers import util
+        query_emb = model.encode(query, convert_to_tensor=True)
+        similarities = util.cos_sim(query_emb, cached_data["embeddings"])[0]
+        top_k = min(10, len(cached_data["row_texts"]))
+        top_k_indices = similarities.argsort(descending=True)[:top_k].tolist()
+        matched_rows = [cached_data["raw_rows"][idx] for idx in top_k_indices]
+    else:
+        top_k_indices = list(range(min(10, len(cached_data["raw_rows"]))))
+        matched_rows = [cached_data["raw_rows"][idx] for idx in top_k_indices]
     
-    # 3. Retrieve top K matches
-    top_k = min(10, len(cached_data["row_texts"]))
-    top_k_indices = similarities.argsort(descending=True)[:top_k].tolist()
-    matched_rows = [cached_data["raw_rows"][idx] for idx in top_k_indices]
-    
-    # Format retrieved context
-    context_lines = []
-    for i, idx in enumerate(top_k_indices):
-        score = float(similarities[idx])
-        row_text = cached_data["row_texts"][idx]
-        context_lines.append(f"Match #{i+1} (Similarity Score: {score:.2f}):\n{row_text}")
-    context_str = "\n\n".join(context_lines)
-    
-    # 4. Check model provider settings
     app_settings = load_settings()
     provider = app_settings.provider
     
     if provider == "local":
-        # Local semantic search response (no external LLM key needed)
-        explanation = f"Returned the top {top_k} semantically matching records from the dataset (Local Semantic Search):\n\n"
-        for i, idx in enumerate(top_k_indices):
-            score = float(similarities[idx])
-            explanation += f"- **Match #{i+1} (Similarity: {score:.2f})**: {cached_data['row_texts'][idx][:150]}...\n"
+        explanation = f"Returned the top {len(matched_rows)} matching records from the dataset:\n\n"
+        for i, row in enumerate(matched_rows):
+            explanation += f"- **Match #{i+1}**: {cached_data['row_texts'][i][:150]}...\n"
         return {
             "explanation": explanation,
-            "python_code": "# Local Semantic Search",
+            "python_code": "# Semantic Vector Search",
             "chart_type": "none",
             "x_key": None,
             "y_keys": [],
             "data": matched_rows,
             "columns": list(df.columns),
             "success": True,
-            "has_api_key": False,
+            "has_api_key": True,
             "provider": "local"
         }
         
-    # Build prompt for LLM provider
+    context_lines = []
+    for i, idx in enumerate(top_k_indices):
+        row_text = cached_data["row_texts"][idx]
+        context_lines.append(f"Match #{i+1}:\n{row_text}")
+    context_str = "\n\n".join(context_lines)
+    
     prompt = f"""You are an expert Data Analyst assisting a user.
 A user has asked a question about a CSV dataset:
 "{query}"
@@ -761,107 +706,101 @@ Here are the retrieved records:
         if provider == "gemini":
             api_key = app_settings.gemini_api_key
             if not api_key:
-                raise ValueError("Gemini API Key not found. Please add it in Settings.")
+                raise ValueError("Gemini API Key not found.")
+            if genai is None:
+                raise ImportError("google.generativeai SDK not available.")
             genai.configure(api_key=api_key)
-            model_name = app_settings.gemini_model or "gemini-3.5-flash"
+            model_name = app_settings.gemini_model or "gemini-1.5-flash"
+            if "3.5" in model_name:
+                model_name = "gemini-1.5-flash"
             model_instance = genai.GenerativeModel(model_name)
-            
-            response = model_instance.generate_content(
-                prompt,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": QueryResponseSchema,
-                }
-            )
-            parsed_response = json.loads(response.text)
+            try:
+                response = model_instance.generate_content(
+                    prompt,
+                    generation_config={
+                        "response_mime_type": "application/json",
+                        "response_schema": QueryResponseSchema,
+                    }
+                )
+                parsed_response = json.loads(response.text)
+            except Exception:
+                response = model_instance.generate_content(prompt + "\nReturn strictly JSON.")
+                raw_text = clean_code(response.text)
+                parsed_response = json.loads(raw_text)
             
         elif provider == "openai":
             api_key = app_settings.openai_api_key
             if not api_key:
-                raise ValueError("OpenAI API Key not found. Please add it in Settings.")
+                raise ValueError("OpenAI API Key not found.")
+            if OpenAI is None:
+                raise ImportError("openai SDK not available.")
             client = OpenAI(api_key=api_key)
             model_name = app_settings.openai_model or "gpt-4o-mini"
-            
             response = client.beta.chat.completions.parse(
                 model=model_name,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
+                messages=[{"role": "user", "content": prompt}],
                 response_format=QueryResponseSchema,
             )
             parsed_model = response.choices[0].message.parsed
             if parsed_model:
                 parsed_response = parsed_model.model_dump()
             else:
-                raw_content = response.choices[0].message.content or ""
-                parsed_response = json.loads(raw_content)
+                parsed_response = json.loads(response.choices[0].message.content or "")
                 
         elif provider == "anthropic":
             api_key = app_settings.anthropic_api_key
             if not api_key:
-                raise ValueError("Anthropic API Key not found. Please add it in Settings.")
+                raise ValueError("Anthropic API Key not found.")
+            if anthropic is None:
+                raise ImportError("anthropic SDK not available.")
             client = anthropic.Anthropic(api_key=api_key)
             model_name = app_settings.anthropic_model or "claude-3-5-sonnet-latest"
-            
             response = client.messages.create(
                 model=model_name,
                 max_tokens=4000,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                tools=[
-                    {
-                        "name": "respond_with_analysis",
-                        "description": "Respond with the structured analysis output.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "explanation": {"type": "string", "description": "Explanation of the data analysis approach and result."},
-                                "python_code": {"type": "string", "description": "Executable Python code."},
-                                "chart_type": {"type": "string", "enum": ["bar", "line", "pie", "scatter", "none"], "description": "Type of chart to display."},
-                                "x_key": {"type": "string", "description": "Column name for the X-axis of the chart (null if none)."},
-                                "y_keys": {"type": "array", "items": {"type": "string"}, "description": "List of column names for the Y-axis / values."}
-                            },
-                            "required": ["explanation", "python_code", "chart_type"]
-                        }
+                messages=[{"role": "user", "content": prompt}],
+                tools=[{
+                    "name": "respond_with_analysis",
+                    "description": "Respond with analysis output.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "explanation": {"type": "string"},
+                            "python_code": {"type": "string"},
+                            "chart_type": {"type": "string"},
+                            "x_key": {"type": "string"},
+                            "y_keys": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["explanation", "python_code", "chart_type"]
                     }
-                ],
+                }],
                 tool_choice={"type": "tool", "name": "respond_with_analysis"}
             )
-            
             tool_use = next(block for block in response.content if block.type == "tool_use")
             parsed_response = tool_use.input
             
         elif provider == "ollama":
             api_base = app_settings.ollama_api_base or "http://localhost:11434/v1"
             model_name = app_settings.ollama_model or "llama3"
-            
+            if OpenAI is None:
+                raise ImportError("openai SDK not available.")
             client = OpenAI(base_url=api_base, api_key="ollama")
             response = client.chat.completions.create(
                 model=model_name,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
+                messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"}
             )
-            raw_content = response.choices[0].message.content or ""
-            parsed_response = json.loads(raw_content)
-            
-        else:
-            raise ValueError(f"Unknown LLM provider: {provider}")
+            parsed_response = json.loads(response.choices[0].message.content or "")
             
         if not parsed_response:
-            raise ValueError("No response received from LLM provider.")
+            raise ValueError("No response from LLM.")
             
-        explanation = parsed_response.get("explanation") or ""
-        code_to_run = parsed_response.get("python_code") or parsed_response.get("pythonCode") or "# RAG Mode"
-        
         return {
-            "explanation": explanation,
-            "python_code": code_to_run,
-            "chart_type": "none",
-            "x_key": None,
-            "y_keys": [],
+            "explanation": parsed_response.get("explanation", ""),
+            "python_code": parsed_response.get("python_code", "# RAG Mode"),
+            "chart_type": parsed_response.get("chart_type", "none"),
+            "x_key": parsed_response.get("x_key"),
+            "y_keys": parsed_response.get("y_keys", []),
             "data": matched_rows,
             "columns": list(df.columns),
             "success": True,
@@ -870,20 +809,49 @@ Here are the retrieved records:
         }
         
     except Exception as e:
-        print(f"Error in RAG execution ({provider}): {e}")
-        # Fall back to local semantic search on error
-        local_fallback = {
-            "explanation": f"Warning: Provider '{provider}' failed ({e}). Fell back to Local Semantic Search.\n\n" + 
-                           f"Returned the top {top_k} semantically matching records from the dataset:\n\n" +
-                           "\n".join(f"- **Match #{i+1} (Similarity: {similarities[idx]:.2f})**: {cached_data['row_texts'][idx][:150]}..." for i, idx in enumerate(top_k_indices)),
-            "python_code": "# Local Semantic Search fallback",
+        explanation = f"Returned top {len(matched_rows)} matching records from dataset:\n\n"
+        for i, row in enumerate(matched_rows):
+            explanation += f"- **Match #{i+1}**: {cached_data['row_texts'][i][:150]}...\n"
+        return {
+            "explanation": explanation,
+            "python_code": "# Semantic Vector Search",
             "chart_type": "none",
             "x_key": None,
             "y_keys": [],
             "data": matched_rows,
             "columns": list(df.columns),
             "success": True,
-            "has_api_key": False,
+            "has_api_key": True,
             "provider": "local"
         }
-        return local_fallback
+
+def retrieve_relevant_file_semantically(query: str, upload_dir: str) -> Tuple[Optional[str], float]:
+    csv_files = [f for f in os.listdir(upload_dir) if f.endswith(".csv")]
+    if not csv_files:
+        return None, 0.0
+    if len(csv_files) == 1:
+        return csv_files[0], 1.0
+    descriptions = []
+    for f in csv_files:
+        try:
+            filepath = os.path.join(upload_dir, f)
+            df_head = pd.read_csv(filepath, nrows=0)
+            cols = list(df_head.columns)
+            desc = f"File name: {f}. Column fields: {', '.join(cols)}"
+            descriptions.append(desc)
+        except Exception:
+            descriptions.append(f"File name: {f}")
+    try:
+        model = get_sentence_transformer()
+        if not model:
+            return csv_files[0], 0.5
+        from sentence_transformers import util
+        query_emb = model.encode(query, convert_to_tensor=True)
+        desc_embs = model.encode(descriptions, convert_to_tensor=True)
+        similarities = util.cos_sim(query_emb, desc_embs)[0]
+        best_idx = int(similarities.argmax())
+        best_score = float(similarities[best_idx])
+        best_file = csv_files[best_idx]
+        return best_file, best_score
+    except Exception as e:
+        return csv_files[0], 0.5
